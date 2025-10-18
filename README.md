@@ -13,6 +13,6 @@ cd /root/ && wget https://raw.githubusercontent.com/ashphp/lempstack/refs/heads/
 ```
 
 > [!IMPORTANT]
->`redis` cache option is not available in Almalinux 10 
+>`redis` cache option is not available in Almalinux 10 (when WP installation is selected).
 
 ### This code is `AI` generated.
