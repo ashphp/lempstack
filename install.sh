@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== helpers =====
+# ========= helpers =========
 bold(){ tput bold 2>/dev/null || true; }
 clr(){ tput setaf "$1" 2>/dev/null || true; }   # 6 = cyan
 rst(){ tput sgr0 2>/dev/null || true; }
@@ -9,27 +9,42 @@ say(){ echo -e "$*"; }
 die(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "Missing binary: $1"; }
 randpass(){ openssl rand -base64 32 | tr -dc 'A-Za-z0-9@#%^+=_' | head -c 24; }
-ask(){ # var, question, default
+
+ask(){ # var, question, default_str (may be empty)
   local __var="$1" __q="$2" __def="${3:-}" ans
   if [ -n "$__def" ]; then
     say "$(bold)${__q}$(rst)  $(clr 6)[Default: ${__def}]$(rst)  (Enter = default)"
   else
-    say "$(bold)${__q}$(rst)  $(clr 6)[Default: none]$(rst)  (Enter = none)"
+    say "$(bold)${__q}$(rst)  $(clr 6)[Default: blank]$(rst)  (Enter = blank)"
   fi
   read -r -p "> " ans || exit 1
   ans="${ans:-$__def}"
   printf -v "$__var" '%s' "$ans"
 }
-ask_yn_no(){ # var, question (default No)
+
+ask_yn01(){ # var, question, default_no=yes->0 or no->0 (default No)
   local __var="$1" __q="$2" a
-  say "$(bold)${__q}$(rst)  $(clr 6)[Default: No]$(rst)  (y/n, yes/no, 1/0, true/false; Enter = No)"
+  say "$(bold)${__q}$(rst)  $(clr 6)[Default: 0 (No)]$(rst)  (accepts: y/n or 1/0)"
   read -r -p "> " a || exit 1
-  a="$(echo "${a:-n}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
-  case "$a" in y|yes|1|true) printf -v "$__var" 'yes' ;; *) printf -v "$__var" 'no' ;; esac
+  a="$(echo "${a:-0}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  case "$a" in 1|y) printf -v "$__var" 'yes' ;; 0|n|'') printf -v "$__var" 'no' ;; *) printf -v "$__var" 'no' ;; esac
 }
+
+ask_cache_num(){ # sets CACHE_CHOICE to none|redis|memcached and CACHE_LABEL
+  local a
+  say "$(bold)Cache backend$(rst)  $(clr 6)[Default: 0]$(rst)"
+  say "  0) none   1) redis   2) memcached"
+  read -r -p "> " a || exit 1
+  case "${a:-0}" in
+    1) CACHE_CHOICE="redis" ;;
+    2) CACHE_CHOICE="memcached" ;;
+    *) CACHE_CHOICE="none" ;;
+  esac
+}
+
 logline(){ [ -n "${LOGFILE:-}" ] && echo "$*" >> "$LOGFILE"; }
 
-# ===== preflight =====
+# ========= preflight =========
 [ -f /etc/almalinux-release ] || die "AlmaLinux required."
 ELVER="$(rpm -E %rhel)"; [[ "$ELVER" =~ ^(8|9|10)$ ]] || die "Unsupported EL version: $ELVER"
 need curl; need openssl
@@ -39,40 +54,30 @@ dnf -y install dnf-plugins-core curl tar unzip policycoreutils-python-utils >/de
 IPV4="$(hostname -I 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+$/){print $i; exit}}' || true)"
 [ -z "$IPV4" ] && IPV4="$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)"
 
-# ===== inputs =====
+# ========= inputs =========
 DOMAIN=""
 ask DOMAIN "Domain name (blank = use server IP with self-signed TLS)" ""
 [ -z "$DOMAIN" ] && DOMAIN="$IPV4"
 
-# auto default email: admin@domain for FQDN, else admin@localhost
-if echo "$DOMAIN" | grep -qi '[a-z]'; then
-  EMAIL_DEF="admin@${DOMAIN}"
-else
-  EMAIL_DEF="admin@localhost"
-fi
-ask EMAIL "Admin email (Let's Encrypt uses this if FQDN)" "$EMAIL_DEF"
+# auto default email
+if echo "$DOMAIN" | grep -qi '[a-z]'; then EMAIL_DEF="admin@${DOMAIN}"; else EMAIL_DEF="admin@localhost"; fi
+ask EMAIL "Admin email (used by Let's Encrypt only if domain is FQDN)" "$EMAIL_DEF"
 
 LOGFILE="/root/lemp_install_${DOMAIN//\//_}.log"; : > "$LOGFILE"; chmod 600 "$LOGFILE"
 
-INSTALL_WP="no"; ask_yn_no INSTALL_WP "Install WordPress (auto DB + wp-config.php + finalize)?"
+INSTALL_WP="no"; ask_yn01 INSTALL_WP "Install WordPress (auto create DB + fill wp-config.php only)?"
+
+# numeric cache selection only if WP chosen
 CACHE_CHOICE="none"
-if [ "$INSTALL_WP" = "yes" ]; then
-  say "$(bold)Caching backend$(rst)  $(clr 6)[Default: none]$(rst)  Options: none, redis, memcached"
-  read -r -p "> " CACHE_CHOICE || exit 1
-  CACHE_CHOICE="${CACHE_CHOICE:-none}"
-  [[ "$CACHE_CHOICE" =~ ^(none|redis|memcached)$ ]] || CACHE_CHOICE="none"
+if [ "$INSTALL_WP" = "yes" ]; then ask_cache_num; fi
+
+# sub-folder: single question; blank = root
+WP_SUBDIR=""; if [ "$INSTALL_WP" = "yes" ]; then
+  ask WP_SUBDIR "WordPress sub-folder (blank = root folder)" ""
+  WP_SUBDIR="${WP_SUBDIR//[^a-zA-Z0-9_-]/}"
 fi
 
-WP_IN_SUBDIR="no"; WP_SUBDIR=""
-if [ "$INSTALL_WP" = "yes" ]; then
-  ask_yn_no WP_IN_SUBDIR "Place WordPress in a subfolder?"
-  if [ "$WP_IN_SUBDIR" = "yes" ]; then
-    ask WP_SUBDIR "Subfolder name" "blog"
-    WP_SUBDIR="${WP_SUBDIR//[^a-zA-Z0-9_-]/}"; [ -n "$WP_SUBDIR" ] || die "Invalid subfolder."
-  fi
-fi
-
-# ===== credentials =====
+# ========= credentials =========
 DB_ROOT_PASS="$(randpass)"
 DB_NAME="wp_${DOMAIN//./_}"
 DB_USER="wpuser"
@@ -81,17 +86,17 @@ WP_TITLE="${DOMAIN}"
 WP_ADMIN_USER="admin"
 WP_ADMIN_PASS="$(randpass)"
 
-# ===== paths =====
+# ========= paths =========
 WEBROOT="/var/www/${DOMAIN}/html"
-WP_PATH="$WEBROOT"; [ "$INSTALL_WP" = "yes" ] && [ "$WP_IN_SUBDIR" = "yes" ] && WP_PATH="$WEBROOT/$WP_SUBDIR"
+WP_PATH="$WEBROOT"; [ -n "$WP_SUBDIR" ] && WP_PATH="$WEBROOT/$WP_SUBDIR"
 NGINX_CONF="/etc/nginx/conf.d/${DOMAIN}.conf"
 
-# ===== log inputs =====
+# ========= log inputs =========
 logline "Domain=$DOMAIN"
 logline "Email=$EMAIL"
 logline "Install_WordPress=$INSTALL_WP"
 logline "Cache=$CACHE_CHOICE"
-logline "WP_Subdir=$WP_IN_SUBDIR ${WP_SUBDIR:-}"
+logline "WP_Subdir=${WP_SUBDIR:-<root>}"
 logline "DB_ROOT_PASS=$DB_ROOT_PASS"
 logline "DB_NAME=$DB_NAME"
 logline "DB_USER=$DB_USER"
@@ -102,7 +107,7 @@ logline "WP_ADMIN_PASS=$WP_ADMIN_PASS"
 logline "Webroot=$WEBROOT"
 logline "Logfile=$LOGFILE"
 
-# ===== repos =====
+# ========= repos =========
 if [ "$ELVER" = "8" ]; then dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled PowerTools || true; else dnf config-manager --set-enabled crb || true; fi
 dnf -y install "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${ELVER}.noarch.rpm"
 dnf -y install "https://rpms.remirepo.net/enterprise/remi-release-${ELVER}.rpm"
@@ -110,19 +115,35 @@ dnf -y module reset php || true
 if dnf -y module list php | grep -q 'remi-8\.4'; then PHP_STREAM="remi-8.4"; else PHP_STREAM="remi-8.3"; fi
 dnf -y module enable php:"$PHP_STREAM"
 
-# ===== install stack =====
+# ========= install stack =========
 dnf -y install nginx mariadb-server
 dnf -y install php php-fpm php-cli php-mysqlnd php-gd php-json php-mbstring php-xml php-zip php-intl php-bcmath php-curl php-opcache php-soap php-dom
 dnf -y install certbot python3-certbot-nginx || true
+
 # caches (+ PHP ext) when selected
 if [ "$INSTALL_WP" = "yes" ]; then
   case "$CACHE_CHOICE" in
-    redis)     dnf -y install redis php-redis ;;
-    memcached) dnf -y install memcached php-pecl-memcached ;;
+    redis)
+      if [ "$ELVER" = "10" ]; then
+        dnf -y install valkey
+        dnf -y install php-pecl-redis || dnf -y install php-redis
+        systemctl enable --now valkey
+      else
+        dnf -y install redis
+        dnf -y install php-pecl-redis || dnf -y install php-redis
+        systemctl enable --now redis
+      fi
+      ;;
+    memcached)
+      dnf -y install memcached php-pecl-memcached
+      systemctl enable --now memcached
+      sed -ri 's/^-l .*/-l 127.0.0.1/' /etc/sysconfig/memcached || true
+      systemctl restart memcached
+      ;;
   esac
 fi
 
-# ===== services =====
+# ========= services =========
 sed -ri 's/^user\s*=.*/user = nginx/' /etc/php-fpm.d/www.conf
 sed -ri 's/^group\s*=.*/group = nginx/' /etc/php-fpm.d/www.conf
 sed -ri 's@^;?listen\s*=.*@listen = /run/php-fpm/www.sock@' /etc/php-fpm.d/www.conf
@@ -131,18 +152,7 @@ sed -ri 's@^;?listen.group\s*=.*@listen.group = nginx@' /etc/php-fpm.d/www.conf
 sed -ri 's@^;?listen.mode\s*=.*@listen.mode = 0660@' /etc/php-fpm.d/www.conf
 systemctl enable --now php-fpm mariadb nginx
 
-# start and bind caches if selected
-if [ "$INSTALL_WP" = "yes" ]; then
-  if [ "$CACHE_CHOICE" = "redis" ]; then
-    systemctl enable --now redis
-  elif [ "$CACHE_CHOICE" = "memcached" ]; then
-    systemctl enable --now memcached
-    sed -ri 's/^-l .*/-l 127.0.0.1/' /etc/sysconfig/memcached || true
-    systemctl restart memcached
-  fi
-fi
-
-# ===== MariaDB secure + WP DB =====
+# ========= MariaDB secure + WP DB =========
 mysqladmin --user=root password "$DB_ROOT_PASS" 2>/dev/null || true
 mysql --user=root --password="$DB_ROOT_PASS" -e "DELETE FROM mysql.user WHERE User='';" || true
 mysql --user=root --password="$DB_ROOT_PASS" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');" || true
@@ -159,7 +169,7 @@ FLUSH PRIVILEGES;
 SQL
 fi
 
-# ===== webroot, SELinux =====
+# ========= webroot, SELinux =========
 mkdir -p "$WEBROOT"
 chown -R nginx:nginx "/var/www/${DOMAIN}"
 chmod -R 755 "/var/www/${DOMAIN}"
@@ -168,7 +178,7 @@ semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/${DOMAIN}/html/wp-conte
 restorecon -R "/var/www/${DOMAIN}" || true
 setsebool -P httpd_can_network_connect 1
 
-# ===== Nginx vhost (with optional subfolder permalink rule) =====
+# ========= Nginx vhost (root + optional subfolder rewrite) =========
 {
 cat <<NGX
 server {
@@ -181,7 +191,7 @@ server {
     location /.well-known/acme-challenge/ { root $WEBROOT; }
 NGX
 
-if [ "$INSTALL_WP" = "yes" ] && [ "$WP_IN_SUBDIR" = "yes" ]; then
+if [ -n "$WP_SUBDIR" ]; then
 cat <<NGX
     # WordPress in subfolder: permalink rewrite
     location /$WP_SUBDIR/ {
@@ -210,7 +220,7 @@ NGX
 
 nginx -t && systemctl reload nginx
 
-# ===== TLS (LE if FQDN, else self-signed) =====
+# ========= TLS (LE if FQDN, else self-signed) =========
 LE_OK=0
 if echo "$DOMAIN" | grep -qi '[a-z]'; then
   set +e
@@ -224,14 +234,13 @@ if [ $LE_OK -ne 1 ]; then
     -keyout /etc/ssl/localcerts/"$DOMAIN".key \
     -out    /etc/ssl/localcerts/"$DOMAIN".crt \
     -subj "/CN=$DOMAIN"
-
   cat > "/etc/nginx/conf.d/${DOMAIN}_ssl_fallback.conf" <<EOF
 server {
     listen 443 ssl http2; server_name $DOMAIN;
     ssl_certificate     /etc/ssl/localcerts/$DOMAIN.crt;
     ssl_certificate_key /etc/ssl/localcerts/$DOMAIN.key;
     root $WEBROOT; index index.php index.html;
-$( [ "$INSTALL_WP" = "yes" ] && [ "$WP_IN_SUBDIR" = "yes" ] && echo "    location /$WP_SUBDIR/ { try_files \$uri \$uri/ /$WP_SUBDIR/index.php?\$args; }" )
+$( [ -n "$WP_SUBDIR" ] && echo "    location /$WP_SUBDIR/ { try_files \$uri \$uri/ /$WP_SUBDIR/index.php?\$args; }" )
     location / { try_files \$uri \$uri/ /index.php?\$args; }
     location ~ \.php\$ { include fastcgi_params; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_pass unix:/run/php-fpm/www.sock; fastcgi_read_timeout 180; }
 }
@@ -240,7 +249,7 @@ EOF
   nginx -t && systemctl reload nginx
 fi
 
-# ===== WordPress: download, wp-config, finalize (no plugins) =====
+# ========= WordPress: download, wp-config, finalize =========
 if [ "$INSTALL_WP" = "yes" ]; then
   mkdir -p "$WP_PATH"
   TMPW="/tmp/wp.tar.gz"
@@ -278,7 +287,7 @@ PHP
   restorecon -R "$WP_PATH/wp-content" || true
 
   # one-time finalize (no plugins)
-  SITE_URL="https://${DOMAIN}"; [ "$WP_IN_SUBDIR" = "yes" ] && SITE_URL="${SITE_URL}/${WP_SUBDIR}"
+  SITE_URL="https://${DOMAIN}"; [ -n "$WP_SUBDIR" ] && SITE_URL="${SITE_URL}/${WP_SUBDIR}"
   INSTALLER="$WP_PATH/install_once.php"
   cat > "$INSTALLER" <<'PHP'
 <?php
@@ -300,19 +309,23 @@ PHP
   sed -i "s|__WP_ADMIN_EMAIL__|$(printf '%s' "$EMAIL" | sed "s|[&/]|\\&|g")|g" "$INSTALLER"
   sed -i "s|__SITE_URL__|$(printf '%s' "$SITE_URL" | sed "s|[&/]|\\&|g")|g" "$INSTALLER"
   chown nginx:nginx "$INSTALLER"
-  curl -fsS "http://$DOMAIN$( [ "$WP_IN_SUBDIR" = "yes" ] && echo "/$WP_SUBDIR" )/install_once.php" -H "Host: $DOMAIN" -m 30 >/dev/null || true
+  curl -fsS "http://$DOMAIN$( [ -n "$WP_SUBDIR" ] && echo "/$WP_SUBDIR" )/install_once.php" -H "Host: $DOMAIN" -m 30 >/dev/null || true
 fi
 
-# ===== firewall =====
+# ========= firewall =========
 if systemctl is-active --quiet firewalld; then
   firewall-cmd --add-service=http --permanent
   firewall-cmd --add-service=https --permanent
   firewall-cmd --reload
 fi
 
-# ===== summary =====
+# ========= summary =========
 PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
 [ -z "$PHP_VER" ] && PHP_VER="$(php -v | head -n1 | awk '{print $2}')"
+
+WP_INSTALLED="no"
+[ -f "$WP_PATH/wp-config.php" ] && WP_INSTALLED="yes"
+
 {
   say ""
   say "$(bold)$(clr 6)==================== INSTALLATION SUMMARY ====================$(rst)"
@@ -320,14 +333,16 @@ PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null ||
   say "Web root: ${WEBROOT}"
   say "PHP: ${PHP_VER} (stream: ${PHP_STREAM})"
   say "Caching: ${CACHE_CHOICE}"
-  if [ "$INSTALL_WP" = "yes" ]; then
-    LOGIN_URL="https://${DOMAIN}$( [ "$WP_IN_SUBDIR" = "yes" ] && echo "/$WP_SUBDIR" )/wp-admin"
+
+  if [ "$WP_INSTALLED" = "yes" ]; then
+    LOGIN_URL="https://${DOMAIN}$( [ -n "$WP_SUBDIR" ] && echo "/$WP_SUBDIR" )/wp-admin"
     say "WordPress path: ${WP_PATH}"
     say "Login URL: ${LOGIN_URL}"
     say "WP admin: ${WP_ADMIN_USER}"
     say "WP admin password: ${WP_ADMIN_PASS}"
     say "WP DB: ${DB_NAME} / ${DB_USER} / ${DB_PASS}"
   fi
+
   say ""
   say "$(bold)=== MariaDB ROOT password ===$(rst) ${DB_ROOT_PASS}"
   say "Credentials log: ${LOGFILE}"
