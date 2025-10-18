@@ -1,4 +1,4 @@
-# lempstack
+# LEMP Stack Auto Installer
 - Interactive LEMP stack installer on Almalinux 8/9/10
 - Installs Nginx, MariaDB and PHP 8.4 on AlmaLinux
 - Optional WordPress + (Memcached or Redis) installation.
