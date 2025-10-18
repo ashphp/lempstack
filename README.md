@@ -15,6 +15,8 @@ cd /root/ && wget https://raw.githubusercontent.com/ashphp/lempstack/refs/heads/
  ```
  certbot --nginx -d yourdomain.com -m admin@yourdomain.com --agree-tos --redirect
  ```
+ - replace `yourdomain.com` with your domain name.
+
 
 > [!IMPORTANT]
 >`redis` cache option is not available in Almalinux 10 (when WP installation is selected).
