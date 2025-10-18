@@ -11,6 +11,7 @@
 ```
 cd /root/ && wget https://raw.githubusercontent.com/ashphp/lempstack/refs/heads/main/install.sh -O install_lemp.sh && chmod +x install_lemp.sh && ./install_lemp.sh
 ```
+- If the SSL certificate installation failed at the time of installation, after you point the domain/hostname to the server IP, you can run this command to reissue the cert. `certbot renew --dry-run`
 
 > [!IMPORTANT]
 >`redis` cache option is not available in Almalinux 10 (when WP installation is selected).
