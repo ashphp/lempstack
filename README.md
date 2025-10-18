@@ -12,5 +12,7 @@
 cd /root/ && wget https://raw.githubusercontent.com/ashphp/lempstack/refs/heads/main/install.sh -O install_lemp.sh && chmod +x install_lemp.sh && ./install_lemp.sh
 ```
 
+> [!IMPORTANT]
+>`redis` cache option is not available in Almalinux 10 
 
 ### This code is `AI` generated.
